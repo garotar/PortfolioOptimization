@@ -1,6 +1,9 @@
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import seaborn as sns
 from sklearn.ensemble import IsolationForest
 from typing import Dict, Any, Optional
 
@@ -30,7 +33,7 @@ class AnomalyDetector:
         if model_params:
             default_params.update(model_params)
 
-        self.model = IsolationForest(**default_params)
+        self.model_params = default_params
 
     def generate_features(self):
         """
@@ -46,8 +49,17 @@ class AnomalyDetector:
         Return:
             Датафрейм с колонками anomaly_score и anomaly (1 - аномалия, 0 - нормальная точка).
         """
-        self.df["anomaly_score"] = self.model.fit_predict(self.df[self.features])
-        self.df["anomaly"] = self.df["anomaly_score"].map(lambda x: 1 if x == -1 else 0)
+        result_df = pd.DataFrame()
+
+        for uid, group in self.df.groupby("UID"):
+            model = IsolationForest(**self.model_params)
+
+            group["anomaly_score"] = model.fit_predict(group[self.features])
+            group["anomaly"] = group["anomaly_score"].apply(lambda x: 1 if x == -1 else 0)
+
+            result_df = pd.concat([result_df, group])
+        
+        self.df = result_df.reset_index(drop=True)
         return self.df
 
     def get_anomalies(self) -> pd.DataFrame:
@@ -56,14 +68,40 @@ class AnomalyDetector:
         """
         return self.df[self.df["anomaly"] == 1]
 
-    def visualize_anomalies(self, instrument_id: str):
+    def visualize_anomalies(self, instrument_id: str, is_interactive: bool = True, date_from: str = None, date_to: str = None):
         """
-        Строит интерактивный график с аномалиями.
+        Строит график с аномалиями.
         """
         df_asset = self.df[self.df["UID"] == instrument_id]
-        fig = px.line(df_asset, x="UTC", y="return", title=f"Anomaly Detection for {instrument_id}", labels={"UTC": "Month-Year", "return": "Return"})
-        anomalies = df_asset[df_asset["anomaly"] == 1]
-        fig.add_scatter(x=anomalies["UTC"], y=anomalies["return"], mode="markers", marker=dict(color="red", size=8), name="Anomalies")
-        fig.update_layout(xaxis_title="Month-Year", yaxis_title="Return", xaxis=dict(tickformat="%m-%Y"))
 
-        fig.show()
+        if date_from:
+            df_asset = df_asset[df_asset["UTC"] >= pd.to_datetime(date_from, utc=True)]
+        if date_to:
+            df_asset = df_asset[df_asset["UTC"] <= pd.to_datetime(date_to, utc=True)]
+
+        anomalies = df_asset[df_asset["anomaly"] == 1]
+
+        if is_interactive:
+            fig = px.line(df_asset, x="UTC", y="return", title=f"Anomaly Detection for {instrument_id}", labels={"UTC": "Month-Year", "return": "Return"})
+            fig.add_scatter(x=anomalies["UTC"], y=anomalies["return"], mode="markers", marker=dict(color="red", size=8), name="Anomalies")
+            fig.update_layout(xaxis_title="Month-Year", yaxis_title="Return", xaxis=dict(tickformat="%m-%Y"))
+
+            fig.show()
+
+        else:
+            plt.figure(figsize=(14, 6))
+            sns.lineplot(data=df_asset, x="UTC", y="return", label="Return")
+            sns.scatterplot(data=anomalies, x="UTC", y="return", color="red", label="Anomalies", s=50)
+
+            plt.title(f"Anomaly Detection for {instrument_id}", fontsize=16)
+            plt.xlabel("Month-Year")
+            plt.ylabel("Return")
+
+            plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m-%Y'))
+            plt.gca().xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+
+            plt.xticks(rotation=45)
+            plt.grid(alpha=0.3)
+            plt.legend()
+            plt.tight_layout()
+            plt.show()

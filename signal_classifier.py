@@ -1,8 +1,9 @@
 import pandas as pd
 import numpy as np
 from catboost import CatBoostClassifier
-from sklearn.metrics import classification_report
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Tuple, Any, Optional
+
+import vectorbt as vbt
 
 from prepare_data import prepare_features
 
@@ -38,7 +39,7 @@ class SignalClassifier:
         self.df["UID"] = self.df["UID"].astype("category")
 
     def _prepare_target(self):
-        self.df["future_return"] = (self.df.groupby("UID")["close"].shift(-self.lookahead) / self.df["close"] - 1)
+        self.df["future_return"] = (self.df.groupby("UID", observed=True)["close"].shift(-self.lookahead) / self.df["close"] - 1)
         self.df["target"] = np.where(self.df["future_return"] > 0, 1, 0)
         self.labeled_df = self.df[self.df["anomaly"] == 1].copy()
 
@@ -66,13 +67,64 @@ class SignalClassifier:
 
         self.X_test, self.y_test = X_test, y_test
 
-    def evaluate(self):
-        """
-        Оценка качества модели.
-        """
+    def evaluate(self) -> pd.DataFrame:
+        full_df = self.df.copy()
+        full_df["signal"] = 0
+
+        test_indices = self.X_test.index
         preds = self.model.predict(self.X_test)
-        report = classification_report(self.y_test, preds, output_dict=True)
-        return report
+
+        full_df.loc[test_indices, "signal"] = preds
+
+        return full_df[["UTC", "UID", "close", "signal"]].reset_index(drop=True)
+
+    def prepare_backtest_data(self):
+        df_with_signals = self.evaluate()
+
+        close_prices = df_with_signals.pivot(index="UTC", columns="UID", values="close").sort_index().ffill().bfill()
+        signals = df_with_signals.pivot(index="UTC", columns="UID", values="signal").reindex(close_prices.index).fillna(0)
+
+        entries = signals.astype(bool)
+        exits = (signals.shift(1).astype(bool)) & (~signals.astype(bool))
+
+        return close_prices, entries, exits
+
+    def run_backtest(self, init_cash: float = 100_000, freq: str = "min"):
+        """
+        Бэктест с использованием библиотеки vectorbt.
+
+        Args:
+            init_cash: начальный капитал.
+            freq: гранулярность свечей, в моем случае 1 минута.
+
+        Return:
+            Объект Portfolio, содержащий статистику стратегии.
+        """
+        close_prices, entries, exits = self.prepare_backtest_data()
+        self.portfolio_signal = vbt.Portfolio.from_signals(close_prices, entries,exits, init_cash=init_cash, freq=freq)
+        
+        return self.portfolio_signal
+    
+    def get_metrics(self, tickers: List[str]) -> dict:
+        """
+        Рассчитывает финансовые метрики: Sharpe Ratio, Sortino Ratio и Max Drawdown.
+
+        Args:
+            tickers: Список тикеров (уникальные UID из датафрейма).
+
+        Return:
+            Словарь с метриками.
+        """  
+        metrics = {}
+        
+        for ticker in tickers:
+            stats_ticker = self.portfolio_signal.stats(column=ticker)
+            metrics[ticker] = {
+                "Sharpe Ratio": stats_ticker.get("Sharpe Ratio", None),
+                "Sortino Ratio": stats_ticker.get("Sortino Ratio", None),
+                "Max Drawdown": stats_ticker.get("Max Drawdown [%]", None)
+            }
+        return metrics
 
     def feature_importance(self) -> pd.DataFrame:
         """
