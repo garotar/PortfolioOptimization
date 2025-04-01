@@ -5,7 +5,7 @@ from typing import List
 
 # Минутные свечи и 252 торговых дня
 vbt.settings.array_wrapper["freq"] = "minutes"
-vbt.settings.returns["year_freq"] = "252 days"
+vbt.settings.returns["year_freq"] = f"{830*252} minutes"
 
 class BaselineBacktest:
     def __init__(self, df: pd.DataFrame, close_price: str = "close"):

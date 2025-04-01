@@ -8,6 +8,10 @@ import vectorbt as vbt
 from prepare_data import prepare_features
 
 
+# Минутные свечи и 252 торговых дня
+vbt.settings.array_wrapper["freq"] = "minutes"
+vbt.settings.returns["year_freq"] = f"{830*252} minutes"
+
 class SignalClassifier:
     def __init__(self, df: pd.DataFrame, features: List[str], lookahead: int = 5, model_params: Optional[Dict[str, Any]] = None):
         """
