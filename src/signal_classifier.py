@@ -1,8 +1,7 @@
 import pandas as pd
 import numpy as np
 from catboost import CatBoostClassifier
-from typing import List, Dict, Any, Optional
-
+from typing import List, Dict, Any, Optional, Tuple
 import vectorbt as vbt
 
 from src.prepare_features import prepare_features
@@ -19,7 +18,7 @@ class SignalClassifier:
         self,
         df: pd.DataFrame,
         features: List[str],
-        lookahead: int = 3,
+        lookahead: int = 7,
         model_params: Optional[Dict[str, Any]] = None
     ):
         """
@@ -34,144 +33,129 @@ class SignalClassifier:
         self.lookahead = lookahead
 
         default_params = {
-            "iterations": 500,
-            "depth": 7,
+            "iterations": 1000,
+            "depth": 6,
             "learning_rate": 0.05,
-            "random_seed": 42,
+            "l2_leaf_reg": 2.0,
+            "bagging_temperature": 1.0,
             "verbose": 100,
-            "early_stopping_rounds": 50,
+            "early_stopping_rounds": 100,
+            "loss_function": "MultiClass",
+            "eval_metric": "TotalF1"
         }
-
         if model_params:
             default_params.update(model_params)
 
-        self.model = CatBoostClassifier(**default_params)
-
-        self._generate_features(self.features)
+        self.model_params = default_params
+        self._generate_features()
         self._prepare_target()
 
-    def _generate_features(
-        self,
-        features: List[str]
-    ):
-        """
-        Генерирует необходимые признаки, используя функцию prepare_features.
-
-        Args:
-            features: Список признаков для генерации.
-        """
-        self.df, self.features = prepare_features(self.df, features)
+    def _generate_features(self):
+        self.df, self.features = prepare_features(self.df, self.features)
         self.df["ticker"] = self.df["ticker"].astype("category")
 
-    def _prepare_target(self):
-        """
-        Размечает таргет для датафрейма с аномалиями. Оставляет только "аномальные" свечи.
-        """
-        self.df["future_return"] = (
-            self.df.groupby("ticker", observed=True)["close"]
-            .shift(-self.lookahead) / self.df["close"] - 1)
-        self.df["target"] = np.where(self.df["future_return"] > 0, 1, 0)
-        self.labeled_df = self.df[self.df["anomaly"] == 1].copy()
+    def _prepare_target(
+        self,
+        threshold: float = 0.05,
+        window: int = 20
+    ):
+        self.df["future_return"] = self.df.groupby("ticker")["close"].pct_change(self.lookahead).shift(-self.lookahead)
+        self.df["rolling_sigma"] = self.df.groupby("ticker")["return"].transform(lambda x: x.rolling(window).std())
 
-    # TODO: переделать разбивку на train/val/test с использованием ratio
+        up_thr = threshold * self.df["rolling_sigma"]
+        down_thr = -threshold * self.df["rolling_sigma"]
+
+        self.df["target"] = 0
+        self.df.loc[self.df["future_return"] > up_thr, "target"] = 1
+        self.df.loc[self.df["future_return"] < down_thr, "target"] = -1
+
+        self.df.ffill(inplace=True)
+        self.labeled_df = self.df[self.df["target"] != 0]
+
+    def check_class_balance(self):
+        print("Баланс классов по тикерам:")
+        for ticker, group in self.labeled_df.groupby("ticker"):
+            print(f"{ticker}:\n{group['target'].value_counts()}\n")
+
     def train(
         self,
-        train_period_end: str,
-        eval_period_end: str
+        test_split_ratio: float = 0.1,
+        n_folds: int = 5,
+        gap: int = 5
     ):
-        """
-        Обучение модели.
+        close_price = self.df.pivot(index="date", columns="ticker", values="close").sort_index()
+        dates = close_price.index
+        cutoff_date = dates[int(len(dates) * (1 - test_split_ratio))]
 
-        Args:
-            train_period_end: Конец train_df.
-            eval_period_end: Конец eval_df.
-        """
-        train_df = self.labeled_df[self.labeled_df["date"] <= train_period_end].copy()
-        eval_df = self.labeled_df[(self.labeled_df["date"] > train_period_end) & (self.labeled_df["date"] <= eval_period_end)].copy()
-        test_df = self.labeled_df[self.labeled_df["date"] > eval_period_end].copy()
+        print(f"Дата разделения train/test: {cutoff_date.date()}")
 
-        X_train, y_train = train_df[["ticker"] + self.features], train_df["target"]
-        X_eval, y_eval = eval_df[["ticker"] + self.features], eval_df["target"]
-        X_test, y_test = test_df[["ticker"] + self.features], test_df["target"]
+        train_df = self.labeled_df[self.labeled_df["date"] <= cutoff_date]
+        test_df = self.df[self.df["date"] > cutoff_date]
 
-        cat_features = ["ticker"]
+        X_train = train_df[["ticker"] + self.features]
+        y_train = train_df["target"]
+        cat_features = [0]
 
-        self.model.fit(
-            X_train,
-            y_train,
-            eval_set=(X_eval, y_eval),
-            cat_features=cat_features
+        dates = train_df["date"].unique()
+        fold_sizes = np.linspace(0.6, 0.9, n_folds, endpoint=False)
+        date_cutoffs = dates[(fold_sizes * len(dates)).astype(int)]
+
+        best_iterations = []
+        for i, cut_date in enumerate(date_cutoffs):
+            train_mask = train_df["date"] <= cut_date
+            val_mask = (train_df["date"] > cut_date + pd.Timedelta(days=gap))
+            if i < len(date_cutoffs) - 1:
+                val_mask &= (train_df["date"] <= date_cutoffs[i + 1])
+
+            X_tr = X_train[train_mask]
+            y_tr = y_train[train_mask]
+            X_val = X_train[val_mask]
+            y_val = y_train[val_mask]
+
+            fold_model = CatBoostClassifier(**self.model_params, random_seed=42+i)
+            fold_model.fit(
+                X_tr,
+                y_tr,
+                eval_set=(X_val, y_val),
+                cat_features=cat_features,
+                use_best_model=True,
+                verbose=False
+            )
+            best_iterations.append(fold_model.get_best_iteration())
+
+        optimal_iters = int(np.mean(best_iterations))
+        print(f"Оптимальное количество итераций: {optimal_iters}")
+
+        self.model_params["iterations"] = optimal_iters
+        self.model = CatBoostClassifier(**self.model_params)
+        self.model.fit(X_train, y_train, cat_features=cat_features)
+
+        self.test_df = test_df
+
+    def evaluate(
+        self,
+        bull_threshold: float = 0.5,
+        bear_threshold: float = 0.5
+    ) -> Tuple[np.array, pd.DataFrame]:
+
+        X_test = self.test_df[["ticker"] + self.features]
+        proba = self.model.predict_proba(X_test)
+        idx_bear = np.where(self.model.classes_ == -1)[0][0]
+        idx_bull = np.where(self.model.classes_ == 1)[0][0]
+
+        bear_p = proba[:, idx_bear]
+        bull_p = proba[:, idx_bull]
+
+        preds = np.where(
+            bull_p >= bull_threshold, 1,
+            np.where(bear_p >= bear_threshold, -1, 0)
         )
 
-        print("Модель успешно обучена!")
+        result = self.test_df[["date", "ticker", "close"]].copy()
+        result["signal"] = preds
+        result = result.sort_values(["date", "ticker"]).reset_index(drop=True)
 
-        self.X_test, self.y_test = X_test, y_test
-
-    def evaluate(self) -> pd.DataFrame:
-        full_df = self.df.copy()
-        full_df["signal"] = 0
-
-        test_indices = self.X_test.index
-        preds = self.model.predict(self.X_test)
-
-        full_df.loc[test_indices, "signal"] = preds
-
-        return full_df[["date", "ticker", "close", "signal"]].reset_index(drop=True)
-
-    def prepare_backtest_data(self):
-        df_with_signals = self.evaluate()
-
-        close_prices = df_with_signals.pivot(index="date", columns="ticker", values="close").sort_index().ffill().bfill()
-        signals = df_with_signals.pivot(index="date", columns="ticker", values="signal").reindex(close_prices.index).fillna(0)
-
-        entries = signals.astype(bool)
-        exits = (signals.shift(1).astype(bool)) & (~signals.astype(bool))
-
-        return close_prices, entries, exits
-
-    def run_backtest(
-        self,
-        init_cash: float = 100_000,
-        freq: str = "day"
-    ):
-        """
-        Бэктест с использованием библиотеки vectorbt.
-
-        Args:
-            init_cash: начальный капитал.
-            freq: гранулярность свечей, в моем случае 1 день.
-
-        Returns:
-            Объект Portfolio, содержащий статистику стратегии.
-        """
-        close_prices, entries, exits = self.prepare_backtest_data()
-        self.portfolio_signal = vbt.Portfolio.from_signals(close_prices, entries, exits, init_cash=init_cash, freq=freq)
-
-        return self.portfolio_signal
-
-    def get_metrics(
-        self,
-        tickers: List[str]
-    ) -> dict:
-        """
-        Рассчитывает финансовые метрики: Sharpe Ratio, Sortino Ratio и Max Drawdown.
-
-        Args:
-            tickers: Список тикеров (уникальные ticker из датафрейма).
-
-        Returns:
-            Словарь с метриками.
-        """
-        metrics = {}
-
-        for ticker in tickers:
-            stats_ticker = self.portfolio_signal.stats(column=ticker)
-            metrics[ticker] = {
-                "Sharpe Ratio": stats_ticker.get("Sharpe Ratio", None),
-                "Sortino Ratio": stats_ticker.get("Sortino Ratio", None),
-                "Max Drawdown": stats_ticker.get("Max Drawdown [%]", None)
-            }
-        return metrics
+        return (proba, result)
 
     def feature_importance(self) -> pd.DataFrame:
         """
@@ -179,3 +163,43 @@ class SignalClassifier:
         """
         importance = self.model.get_feature_importance(prettified=True)
         return importance
+
+    def run_backtest(
+        self,
+        signals_df: pd.DataFrame,
+        init_cash: float = 100_000,
+        freq: str = "days"
+    ):
+        """
+        Бэктест стратегии на bullish/bearish сигналах.
+
+        Args:
+            signals_df: Датафрейм с сигналами.
+            init_cash: Начальный капитал.
+            freq: Гранулярность свечей. В моем случае - "день".
+
+        Returns:
+            Объект Portfolio и основные метрики.
+        """
+        pivot_signals = signals_df.pivot(index="date", columns="ticker", values="signal").fillna(0)
+        test_prices = self.df.pivot(index="date", columns="ticker", values="close").loc[pivot_signals.index]
+
+        entries = (pivot_signals == 1) & (pivot_signals.shift(1).fillna(0) != 1)
+        exits = pivot_signals == -1
+
+        self.signal_portfolio = vbt.Portfolio.from_signals(
+            close=test_prices,
+            entries=entries,
+            exits=exits,
+            init_cash=init_cash,
+            size=np.inf,
+            size_type="value",
+            cash_sharing=True,
+            group_by=True,
+            freq=freq,
+            direction="longonly"
+        )
+
+        metrics = self.signal_portfolio.stats(metrics=["sharpe_ratio", "sortino_ratio", "max_dd", "total_return"])
+
+        return self.signal_portfolio, dict(metrics)

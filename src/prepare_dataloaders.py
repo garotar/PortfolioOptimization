@@ -1,87 +1,209 @@
 import pandas as pd
 import numpy as np
+from sklearn.preprocessing import StandardScaler
 import torch
-from torch.utils.data import TensorDataset, DataLoader
-from typing import Dict
+from torch.utils.data import Dataset, DataLoader
 
 
-def prepare_dataloaders(
-    returns: pd.DataFrame,
-    rolling_covs: pd.DataFrame,
-    seq_len: int = 60,
-    forecast_horizon: int = 7,
-    batch_size: int = 64,
-    train_ratio: float = 0.7,
-    val_ratio: float = 0.15
-) -> Dict[str, DataLoader]:
-    """
-    Подготавливает DataLoader'ы для обучения LSTM.
+class FinTSDataset(Dataset):
+    def __init__(
+        self,
+        X: pd.DataFrame,
+        y: pd.DataFrame,
+        corr_matrix: np.array,
+        window: int
+    ):
+        self.X = X.values
+        self.y = y.values
+        self.corr_matrix = corr_matrix
+        self.window = window
+        self.dates = y.index
 
-    Args:
-        returns: Pivot датафрейм (индекс-дата, колонки-тикеры) с доходностями.
-        rolling_covs: Pivot датафрейм с ковариационными матрицами доходностей.
-                        Используется мульти-индекс: [дата, тикер].
+    def __len__(self):
+        return len(self.X) - self.window
 
-        seq_len: Длина входной последовательности.
-        forecast_horizon: Горизонт прогнозирования.
-        batch_size: Размер батча для DataLoader.
-        train_ratio: Доля данных для обучения.
-        val_ratio: Доля данных для валидации.
+    def __getitem__(self, idx: int):
+        X_window = torch.tensor(self.X[idx:idx+self.window],
+                                dtype=torch.float32)
+        corr_window = torch.tensor(self.corr_matrix[idx:idx+self.window],
+                                   dtype=torch.float32)
+        y_window = torch.tensor(self.y[idx+self.window],
+                                dtype=torch.float32)
+        return (X_window, corr_window, y_window)
 
-    Returns:
-        Словарь train/val/test DataLoader'ами.
-    """
-    sequences_X_ret = []
-    sequences_X_cov = []
-    sequences_y = []
 
-    returns_values = returns.values
-    dates = returns.index
+class FinTSDataloaders:
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        window: int,
+        forecast_horizon: int,
+        batch_size: int
+    ):
+        self.df = df
+        self.window = window
+        self.forecast_horizon = forecast_horizon
+        self.batch_size = batch_size
 
-    total_samples = len(dates) - seq_len - forecast_horizon + 1
+        self.close_prices = self.df.pivot(index="date", columns="ticker", values="close").sort_index().ffill().bfill()
+        self.volumes = self.df.pivot(index="date", columns="ticker", values="volume").sort_index().ffill().bfill()
 
-    train_end = int(total_samples * train_ratio)
-    val_end = train_end + int(total_samples * val_ratio)
+    def add_features(self):
+        features_dict = {}
+        for ticker in self.close_prices.columns:
+            ticker_features = pd.DataFrame(index=self.close_prices.index)
 
-    indices = {
-        "train": (0, train_end),
-        "val": (train_end, val_end),
-        "test": (val_end, total_samples)
-    }
+            # доходности за разные периоды
+            for period in [1, 5, 10, 20]:
+                ticker_features[f"return_{period}d"] = self.close_prices[ticker].pct_change(periods=period)
 
-    for i in range(total_samples):
-        X_ret = returns_values[i:i+seq_len]
+            # скользящие средние доходности
+            for ma_window in [5, 10, 20]:
+                ma = self.close_prices[ticker].rolling(window=ma_window).mean()
+                ticker_features[f"ma_return_{ma_window}d"] = self.close_prices[ticker] / ma - 1
 
-        cov_matrices = []
-        for j in range(i, i+seq_len):
-            date = dates[j]
-            cov_matrix = rolling_covs.loc[date].values
-            cov_matrices.append(cov_matrix)
+            # волатильность
+            for vol_window in [5, 10, 20]:
+                vol = self.close_prices[ticker].pct_change().rolling(window=vol_window).std()
+                ticker_features[f"volatility_{vol_window}d"] = vol
 
-        X_cov = np.stack(cov_matrices)
+            # объем торгов
+            ticker_features["volume"] = self.volumes[ticker]
+            ticker_features["volume_ma5"] = self.volumes[ticker].rolling(window=5).mean()
+            ticker_features["volume_ma20"] = self.volumes[ticker].rolling(window=20).mean()
+            ticker_features["volume_ratio"] = ticker_features["volume_ma5"] / ticker_features["volume_ma20"]
 
-        y = returns_values[i+seq_len:i+seq_len+forecast_horizon].flatten()
+            # таргет
+            ticker_features[f"target_return_{self.forecast_horizon}d"] = (
+                self.close_prices[ticker].pct_change(periods=-self.forecast_horizon).shift(self.forecast_horizon)
+            )
 
-        sequences_X_ret.append(X_ret)
-        sequences_X_cov.append(X_cov)
-        sequences_y.append(y)
+            features_dict[ticker] = ticker_features.ffill().bfill()
 
-    X_ret_tensor = torch.tensor(np.array(sequences_X_ret), dtype=torch.float32)
-    X_cov_tensor = torch.tensor(np.array(sequences_X_cov), dtype=torch.float32)
-    y_tensor = torch.tensor(np.array(sequences_y), dtype=torch.float32)
+        combined_features = pd.concat(features_dict, axis=1)
 
-    data = {
-        split: TensorDataset(
-            X_ret_tensor[start:end],
-            X_cov_tensor[start:end],
-            y_tensor[start:end]
+        features_df = combined_features.drop(columns=f"target_return_{self.forecast_horizon}d", level=1)
+        target_df = combined_features.xs(f"target_return_{self.forecast_horizon}d", level=1, axis=1)
+
+        return (features_df, target_df)
+
+    def create_corr_matrices(self):
+        returns_df = self.close_prices.pct_change().fillna(0)
+        corr_matrices = []
+
+        for i in range(len(returns_df)):
+            if i < self.window:
+                window_returns = returns_df.iloc[:i+1]
+            else:
+                window_returns = returns_df.iloc[i-self.window+1:i+1]
+            corr_matrix = window_returns.corr().fillna(0).values
+            corr_matrices.append(corr_matrix)
+
+        corr_matrices = np.array(corr_matrices)
+
+        return corr_matrices
+
+    def split_and_scale_data(
+        self,
+        train_split_ratio: float = 0.7,
+        val_split_ratio: float = 0.2
+    ):
+        features_df, target_df = self.add_features()
+        corr_matrices = self.create_corr_matrices()
+
+        train_size = int(len(features_df) * train_split_ratio)
+        val_size = int(len(features_df) * val_split_ratio)
+
+        X_train = features_df.iloc[:train_size]
+        X_val = features_df.iloc[train_size:train_size+val_size]
+        X_test = features_df.iloc[train_size+val_size:]
+
+        y_train = target_df.iloc[:train_size]
+        y_val = target_df.iloc[train_size:train_size+val_size]
+        y_test = target_df.iloc[train_size+val_size:]
+
+        corr_train = corr_matrices[:train_size]
+        corr_val = corr_matrices[train_size:train_size+val_size]
+        corr_test = corr_matrices[train_size+val_size:]
+
+        feature_scaler = StandardScaler()
+        target_scaler = StandardScaler()
+
+        X_train_scaled = pd.DataFrame(
+            feature_scaler.fit_transform(X_train),
+            columns=X_train.columns,
+            index=X_train.index
         )
-        for split, (start, end) in indices.items()
-    }
+        X_val_scaled = pd.DataFrame(
+            feature_scaler.transform(X_val),
+            columns=X_val.columns,
+            index=X_val.index
+        )
+        X_test_scaled = pd.DataFrame(
+            feature_scaler.transform(X_test),
+            columns=X_test.columns,
+            index=X_test.index
+        )
 
-    dataloaders = {
-        split: DataLoader(dataset, batch_size=batch_size, shuffle=False)
-        for split, dataset in data.items()
-    }
+        y_train_scaled = pd.DataFrame(
+            target_scaler.fit_transform(y_train),
+            columns=y_train.columns,
+            index=y_train.index
+        )
+        y_val_scaled = pd.DataFrame(
+            target_scaler.transform(y_val),
+            columns=y_val.columns,
+            index=y_val.index
+        )
+        y_test_scaled = pd.DataFrame(
+            target_scaler.transform(y_test),
+            columns=y_test.columns,
+            index=y_test.index
+        )
 
-    return dataloaders
+        return (
+            X_train_scaled, X_val_scaled, X_test_scaled,
+            y_train_scaled, y_val_scaled, y_test_scaled,
+            corr_train, corr_val, corr_test,
+            feature_scaler, target_scaler
+        )
+
+    def get_loaders(
+        self,
+        train_split_ratio: float = 0.7,
+        val_split_ratio: float = 0.2
+    ):
+        (
+            X_train_scaled, X_val_scaled, X_test_scaled,
+            y_train_scaled, y_val_scaled, y_test_scaled,
+            corr_train, corr_val, corr_test,
+            feature_scaler, target_scaler
+        ) = self.split_and_scale_data(train_split_ratio, val_split_ratio)
+
+        train_dataset = FinTSDataset(X_train_scaled,
+                                     y_train_scaled,
+                                     corr_train,
+                                     self.window)
+        val_dataset = FinTSDataset(X_val_scaled,
+                                   y_val_scaled,
+                                   corr_val,
+                                   self.window)
+        test_dataset = FinTSDataset(X_test_scaled,
+                                    y_test_scaled,
+                                    corr_test,
+                                    self.window)
+
+        train_loader = DataLoader(train_dataset,
+                                  batch_size=self.batch_size,
+                                  shuffle=True)
+        val_loader = DataLoader(val_dataset,
+                                batch_size=self.batch_size,
+                                shuffle=False)
+        test_loader = DataLoader(test_dataset,
+                                 batch_size=self.batch_size,
+                                 shuffle=False)
+
+        return (
+            train_loader, val_loader, test_loader,
+            feature_scaler, target_scaler
+            )

@@ -1,9 +1,7 @@
 import pandas as pd
 import numpy as np
 import vectorbt as vbt
-from typing import List, Tuple, Dict
-
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+from typing import Tuple, Dict
 
 vbt.settings.array_wrapper["freq"] = "days"
 vbt.settings.returns["year_freq"] = "252 days"
@@ -27,92 +25,128 @@ class BaselineBacktest:
         self.close_price = close_price
 
     def prepare_backtest_data(self) -> pd.DataFrame:
+        """
+        Создает Pivot датафрейм на основе исходного датафрейма.
+
+        Returns:
+            Pivot датафрейм.
+        """
         df_pivot = self.df.pivot(
             index="date",
             columns="ticker",
             values=self.close_price)
-        df_pivot = df_pivot.sort_index()
-        df_pivot = df_pivot.ffill().bfill()
+        df_pivot = df_pivot.sort_index().ffill().bfill()
         return df_pivot
+
+    def get_test_period_dates(
+        self,
+        test_split_ratio: float = 0.1
+    ) -> Tuple[str, str]:
+        """
+        Находит первую и последнюю дату тестовой выборки.
+
+        Args:
+            test_split_ratio: Доля тестовой выборки.
+
+        Returns:
+            Кортеж с первой и последней датой.
+        """
+        close_prices = self.prepare_backtest_data()
+
+        n = len(close_prices)
+        test_len = int(n * test_split_ratio)
+
+        test_start = close_prices.index[-test_len]
+        test_end = close_prices.index[-1]
+
+        start = test_start.strftime("%Y-%m-%d")
+        end = test_end.strftime("%Y-%m-%d")
+
+        return (start, end)
+
+    def buy_and_hold_performance(
+        self,
+        test_split_ratio: float = 0.1,
+        init_cash: float = 100_000
+    ) -> Tuple[pd.DataFrame, pd.Series, pd.Series]:
+        """
+        Ручная реализация стратегии "купить и держать".
+
+        Args:
+            test_split_ratio: Доля тестовой выборки.
+            init_cash: Начальный капитал.
+
+        Returns:
+            total_portfolio_df: Датафрейм со стоимостями лотов по каждому тикеру.
+            total_portfolio_value: Общая стоимость портфеля.
+            portfolio_return: Доходность портфеля.
+        """
+        test_period_dates = self.get_test_period_dates(test_split_ratio)
+        close_prices = self.prepare_backtest_data()
+
+        test_close_prices = close_prices.loc[test_period_dates[0]: test_period_dates[1]]
+
+        # равновесный портфель
+        tickers = test_close_prices.columns
+        N = len(tickers)
+        weights = 1 / N
+
+        first_prices = test_close_prices.iloc[0]
+        cash_per_ticker = init_cash * weights
+
+        # количество бумаг
+        lots = (cash_per_ticker // first_prices).astype(int)
+        invested_per_ticker = lots * first_prices
+        total_invested = invested_per_ticker.sum()
+
+        # остаток денег
+        cash_resid = init_cash - total_invested
+
+        total_portfolio_df = test_close_prices * lots
+        total_portfolio_value = total_portfolio_df.sum(axis=1)
+        if cash_resid != 0:
+            total_portfolio_value += cash_resid
+
+        portfolio_return = total_portfolio_value / total_portfolio_value.iloc[0] - 1
+        self._lots = lots
+        self.test_close_prices = test_close_prices
+
+        return (total_portfolio_df, total_portfolio_value, portfolio_return)
 
     def run_backtest(
         self,
+        test_split_ratio: float = 0.1,
         init_cash: float = 100_000,
-        freq: str = "day"
-    ) -> vbt.Portfolio:
+        freq: str = "days"
+    ) -> Tuple[vbt.Portfolio, Dict[str, float]]:
         """
-        Бэктест с использованием библиотеки vectorbt.
+        Бэктест с помощью vectorbt.
 
         Args:
-            init_cash: начальный капитал.
-            freq: гранулярность свечей, в моем случае 1 день.
-
-        Return:
-            Объект Portfolio, содержащий статистику стратегии.
-        """
-        close_prices = self.prepare_backtest_data()
-        self.baseline_portfolio = vbt.Portfolio.from_holding(close_prices, init_cash=init_cash, freq=freq)
-
-        return self.baseline_portfolio
-
-    def get_metrics(
-        self,
-        tickers: List[str]
-    ) -> dict:
-        """
-        Рассчитывает финансовые метрики: Sharpe Ratio, Sortino Ratio и Max Drawdown.
-
-        Args:
-            tickers: Список тикеров (уникальные ticker из датафрейма).
-
-        Return:
-            Словарь с метриками.
-        """
-        metrics = {}
-
-        for ticker in tickers:
-            stats_ticker = self.baseline_portfolio.stats(column=ticker)
-            metrics[ticker] = {
-                "Sharpe Ratio": stats_ticker.get("Sharpe Ratio", None),
-                "Sortino Ratio": stats_ticker.get("Sortino Ratio", None),
-                "Max Drawdown": stats_ticker.get("Max Drawdown [%]", None)
-            }
-        return metrics
-
-    @staticmethod
-    def seasonal_naive_forecast(
-        returns: pd.DataFrame,
-        train_ratio: float = 0.9,
-        season_length: int = 7
-    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict[str, float]]:
-        """
-        Наивный прогноз. Взял Seasonal Naive Method.
-
-        Args:
-            returns: Pivot датафрейм доходностей.
-            train_ratio: Доля данных для обучения.
-            season_length: Число точек, используемых для прогноза.
+            test_split_ratio: Доля тестовой выборки.
+            init_cash: Начальный капитал.
+            freq: Гранулярность свечей. В моем случае - "день".
 
         Returns:
-            forecast: Датафрейм с прогнозами.
-            test: Датафрейм с таргетами.
-            combined: Объединённый датафрейм с таргетами и прогнозами.
-            metrics: Словарь с метриками.
+            Объект Portfolio и основные метрики.
         """
-        n = len(returns)
-        n_train = int(n * train_ratio)
-        train = returns.iloc[:n_train]
-        test = returns.iloc[n_train:]
+        test_period_dates = self.get_test_period_dates(test_split_ratio)
+        close_prices = self.prepare_backtest_data().loc[test_period_dates[0]: test_period_dates[1]]
 
-        seasonal_values = train.iloc[-season_length:]
+        size_df = pd.DataFrame(0, index=close_prices.index, columns=close_prices.columns)
+        size_df.iloc[0] = self._lots
 
-        reps = int(np.ceil(len(test) / season_length))
-        forecast = pd.concat([seasonal_values] * reps, axis=0).iloc[:len(test)]
+        self.baseline_portfolio = vbt.Portfolio.from_orders(
+            close=close_prices,
+            size=size_df,
+            size_type="amount",
+            direction="longonly",
+            init_cash=init_cash,
+            cash_sharing=True,
+            group_by=True,
+            freq=freq
+        )
 
-        forecast.index = test.index
+        metrics = self.baseline_portfolio.stats(metrics=["sharpe_ratio", "sortino_ratio", "max_dd", "total_return"])
 
-        mae = mean_absolute_error(test.values, forecast.values)
-        rmse = np.sqrt(mean_squared_error(test.values, forecast.values))
-        metrics = {"MAE": mae, "RMSE": rmse}
-
-        return (forecast, metrics, train, test)
+        return (self.baseline_portfolio, dict(metrics))
