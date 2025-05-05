@@ -211,14 +211,29 @@ class Trainer:
             entries=entries,
             exits=exits,
             init_cash=init_cash,
-            size=np.inf,
-            size_type="value",
+            size=1/len(close_prices.columns),
+            size_type="percent",
             cash_sharing=True,
             group_by=True,
             freq=freq,
             direction="longonly"
         )
 
+        portfolio_weights = vbt.Portfolio.from_signals(
+            close=test_prices,
+            entries=entries,
+            exits=exits,
+            init_cash=init_cash,
+            size=1/len(close_prices.columns),
+            size_type="percent",
+            cash_sharing=True,
+            group_by=False,
+            freq=freq,
+            direction="longonly"
+        )
+
+        weights_df = portfolio_weights.asset_value().divide(portfolio_weights.value(), axis=0).fillna(0)
+
         nn_metrics = portfolio.stats(metrics=["sharpe_ratio", "sortino_ratio", "max_dd", "total_return"])
 
-        return (portfolio, dict(nn_metrics))
+        return (portfolio, weights_df, dict(nn_metrics))

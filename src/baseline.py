@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import vectorbt as vbt
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 
 vbt.settings.array_wrapper["freq"] = "days"
 vbt.settings.returns["year_freq"] = "252 days"
@@ -40,12 +40,14 @@ class BaselineBacktest:
 
     def get_test_period_dates(
         self,
-        test_split_ratio: float = 0.1
+        backtest_date: str,
+        test_split_ratio: Optional[float] = None
     ) -> Tuple[str, str]:
         """
         Находит первую и последнюю дату тестовой выборки.
 
         Args:
+            backtest_date: Конкретная дата тестовой выборки (если test_split_ratio не задан).
             test_split_ratio: Доля тестовой выборки.
 
         Returns:
@@ -53,11 +55,15 @@ class BaselineBacktest:
         """
         close_prices = self.prepare_backtest_data()
 
-        n = len(close_prices)
-        test_len = int(n * test_split_ratio)
+        if test_split_ratio is not None:
+            n = len(close_prices)
+            test_len = int(n * test_split_ratio)
 
-        test_start = close_prices.index[-test_len]
-        test_end = close_prices.index[-1]
+            test_start = close_prices.index[-test_len]
+            test_end = close_prices.index[-1]
+        else:
+            test_start = pd.to_datetime(backtest_date)
+            test_end = close_prices.index[-1]
 
         start = test_start.strftime("%Y-%m-%d")
         end = test_end.strftime("%Y-%m-%d")
@@ -66,13 +72,15 @@ class BaselineBacktest:
 
     def buy_and_hold_performance(
         self,
-        test_split_ratio: float = 0.1,
+        backtest_date: str,
+        test_split_ratio: Optional[float] = None,
         init_cash: float = 100_000
     ) -> Tuple[pd.DataFrame, pd.Series, pd.Series]:
         """
         Ручная реализация стратегии "купить и держать".
 
         Args:
+            backtest_date: Начальная дата тестовой выборки (если test_split_ratio не задан).
             test_split_ratio: Доля тестовой выборки.
             init_cash: Начальный капитал.
 
@@ -81,7 +89,7 @@ class BaselineBacktest:
             total_portfolio_value: Общая стоимость портфеля.
             portfolio_return: Доходность портфеля.
         """
-        test_period_dates = self.get_test_period_dates(test_split_ratio)
+        test_period_dates = self.get_test_period_dates(backtest_date, test_split_ratio)
         close_prices = self.prepare_backtest_data()
 
         test_close_prices = close_prices.loc[test_period_dates[0]: test_period_dates[1]]
@@ -115,7 +123,8 @@ class BaselineBacktest:
 
     def run_backtest(
         self,
-        test_split_ratio: float = 0.1,
+        backtest_date: str,
+        test_split_ratio: Optional[float] = None,
         init_cash: float = 100_000,
         freq: str = "days"
     ) -> Tuple[vbt.Portfolio, Dict[str, float]]:
@@ -123,6 +132,7 @@ class BaselineBacktest:
         Бэктест с помощью vectorbt.
 
         Args:
+            backtest_date: Начальная дата тестовой выборки (если test_split_ratio не задан).
             test_split_ratio: Доля тестовой выборки.
             init_cash: Начальный капитал.
             freq: Гранулярность свечей. В моем случае - "день".
@@ -130,7 +140,7 @@ class BaselineBacktest:
         Returns:
             Объект Portfolio и основные метрики.
         """
-        test_period_dates = self.get_test_period_dates(test_split_ratio)
+        test_period_dates = self.get_test_period_dates(backtest_date, test_split_ratio)
         close_prices = self.prepare_backtest_data().loc[test_period_dates[0]: test_period_dates[1]]
 
         size_df = pd.DataFrame(0, index=close_prices.index, columns=close_prices.columns)

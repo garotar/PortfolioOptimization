@@ -78,7 +78,7 @@ class FinTSDataloaders:
                 self.close_prices[ticker].pct_change(periods=-self.forecast_horizon).shift(self.forecast_horizon)
             )
 
-            features_dict[ticker] = ticker_features.ffill().bfill()
+            features_dict[ticker] = ticker_features.ffill().fillna(0)
 
         combined_features = pd.concat(features_dict, axis=1)
 
@@ -115,16 +115,22 @@ class FinTSDataloaders:
         val_size = int(len(features_df) * val_split_ratio)
 
         X_train = features_df.iloc[:train_size]
-        X_val = features_df.iloc[train_size:train_size+val_size]
-        X_test = features_df.iloc[train_size+val_size:]
+        X_val = features_df.iloc[train_size + self.window:train_size + val_size + self.window]
+        X_test = features_df.iloc[train_size + val_size + self.window:]
+        # X_val = features_df.iloc[train_size:train_size+val_size]
+        # X_test = features_df.iloc[train_size+val_size:]
 
         y_train = target_df.iloc[:train_size]
-        y_val = target_df.iloc[train_size:train_size+val_size]
-        y_test = target_df.iloc[train_size+val_size:]
+        y_val = target_df.iloc[train_size + self.window:train_size + val_size + self.window]
+        y_test = target_df.iloc[train_size + val_size + self.window:]
+        # y_val = target_df.iloc[train_size:train_size+val_size]
+        # y_test = target_df.iloc[train_size+val_size:]
 
         corr_train = corr_matrices[:train_size]
-        corr_val = corr_matrices[train_size:train_size+val_size]
-        corr_test = corr_matrices[train_size+val_size:]
+        corr_val = corr_matrices[train_size + self.window:train_size + val_size + self.window]
+        corr_test = corr_matrices[train_size + val_size + self.window:]
+        # corr_val = corr_matrices[train_size:train_size+val_size]
+        # corr_test = corr_matrices[train_size+val_size:]
 
         feature_scaler = StandardScaler()
         target_scaler = StandardScaler()

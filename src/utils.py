@@ -162,3 +162,23 @@ def plot_lstm_predictions(
     plt.grid(alpha=0.3)
     plt.tight_layout()
     plt.show()
+
+
+def plot_portfolio_weights(
+    weights_df,
+    figsize: tuple = (14, 6)
+):
+    plt.figure(figsize=figsize)
+    weights_df.plot.area(ax=plt.gca(), alpha=0.7)
+
+    plt.title("Веса портфеля")
+    plt.ylabel("Вес")
+    plt.xlabel("Дата")
+
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter("%m-%Y"))
+    plt.gca().xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.show()

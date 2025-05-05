@@ -167,6 +167,7 @@ class SignalClassifier:
     def run_backtest(
         self,
         signals_df: pd.DataFrame,
+        backtest_date: str,
         init_cash: float = 100_000,
         freq: str = "days"
     ):
@@ -175,6 +176,7 @@ class SignalClassifier:
 
         Args:
             signals_df: Датафрейм с сигналами.
+            backtest_date: Конкретная дата начала тестового периода.
             init_cash: Начальный капитал.
             freq: Гранулярность свечей. В моем случае - "день".
 
@@ -182,12 +184,13 @@ class SignalClassifier:
             Объект Portfolio и основные метрики.
         """
         pivot_signals = signals_df.pivot(index="date", columns="ticker", values="signal").fillna(0)
+        pivot_signals = pivot_signals.loc[backtest_date:]
         test_prices = self.df.pivot(index="date", columns="ticker", values="close").loc[pivot_signals.index]
 
         entries = (pivot_signals == 1) & (pivot_signals.shift(1).fillna(0) != 1)
         exits = pivot_signals == -1
 
-        self.signal_portfolio = vbt.Portfolio.from_signals(
+        signal_portfolio = vbt.Portfolio.from_signals(
             close=test_prices,
             entries=entries,
             exits=exits,
@@ -200,6 +203,21 @@ class SignalClassifier:
             direction="longonly"
         )
 
-        metrics = self.signal_portfolio.stats(metrics=["sharpe_ratio", "sortino_ratio", "max_dd", "total_return"])
+        signal_portfolio_weights = vbt.Portfolio.from_signals(
+            close=test_prices,
+            entries=entries,
+            exits=exits,
+            init_cash=init_cash,
+            size=np.inf,
+            size_type="value",
+            cash_sharing=True,
+            group_by=False,
+            freq=freq,
+            direction="longonly"
+        )
 
-        return self.signal_portfolio, dict(metrics)
+        weights_df = signal_portfolio_weights.asset_value().divide(signal_portfolio_weights.value(), axis=0).fillna(0)
+
+        metrics = signal_portfolio.stats(metrics=["sharpe_ratio", "sortino_ratio", "max_dd", "total_return"])
+
+        return (signal_portfolio, weights_df, dict(metrics))
