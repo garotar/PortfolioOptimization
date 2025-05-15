@@ -8,3 +8,40 @@
 - Реализовать и протестировать методы оптимизации весов портфеля;
 - Выполнить сравнительный анализ предложенных стратегий и оценить их эффективность с помощью ключевых финансовых метрик;
 - Разработать Streamlit приложение.
+
+### Инструменты и технологии:
+
+- **Python**
+- **Pytorch**
+- **Catboost**
+- **Pandas, Numpy**
+- **Matplotlib**
+- **Plotly**
+- **VectorBT**
+- **PyPortfolioOpt**
+- **Streamlit**
+
+### Установка и запуск:
+
+Клонирование репозитория
+
+```bash
+git clone https://github.com/garotar/PortfolioOptimization.git
+cd PortfolioOptimization
+```
+
+Установка зависимостей
+
+```bash
+pip install -r requirements.txt
+```
+
+Запуск Streamlit-приложения
+
+```bash
+streamlit run app.py
+```
+
+### Демонстрация Streamlit-приложения:
+
+![Demo](src/streamlit//streamlit_check.gif)
