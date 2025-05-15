@@ -44,4 +44,4 @@ streamlit run app.py
 
 ### Демонстрация Streamlit-приложения:
 
-![Demo](src/streamlit//streamlit_check.gif)
+![Demo](src/streamlit/streamlit_check.gif)
