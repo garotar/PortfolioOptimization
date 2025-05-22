@@ -23,20 +23,36 @@
 
 ### Установка и запуск:
 
-Клонирование репозитория
+1. Клонирование репозитория
 
 ```bash
 git clone https://github.com/garotar/PortfolioOptimization.git
 cd PortfolioOptimization
 ```
 
-Установка зависимостей
+#### С использованием Docker:
+
+2. Сборка Docker-образа
+```bash
+docker build -t st-app .
+```
+
+3. Запуск Streamlit-приложения
+```bash
+docker run -p 8501:8501 st-app
+```
+
+После запуска приложение будет доступно в браузере по адресу: [http://localhost:8501](http://localhost:8501)
+
+#### Альтернативный способ:
+
+2. Установка зависимостей
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Запуск Streamlit-приложения
+3. Запуск Streamlit-приложения
 
 ```bash
 streamlit run app.py
