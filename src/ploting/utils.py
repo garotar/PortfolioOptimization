@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from typing import Dict
@@ -160,5 +161,80 @@ def plot_dnn_predictions(
 
     plt.legend()
     plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_predictions_from_df(
+    preds_df: pd.DataFrame,
+    target_df: pd.DataFrame,
+    lower_quantile_df: pd.DataFrame,
+    upper_quantile_df: pd.DataFrame,
+    ticker: str,
+    figsize: tuple = (14, 6)
+):
+    """
+    Рисует сравнение прогноза доходности с истинными значениями из датафрейма.
+
+    Args:
+        preds_df: Датафрейм с прогнозами доходности.
+        target_df: Датафрейм с истинной доходностью.
+        lower_quantile_df: Датафрейм с нижней границей.
+        upper_quantile_df: Датафрейм с верхней границей.
+        ticker: Тикер.
+        figsize: Размер графика.
+    """
+    for df in [preds_df, target_df, lower_quantile_df, upper_quantile_df]:
+        if ticker not in df.columns:
+            raise ValueError(f"Тикер '{ticker}' не найден.")
+
+    dates = preds_df.index
+
+    plt.figure(figsize=figsize)
+
+    plt.plot(dates, target_df[ticker], label="Таргет", color="blue", linewidth=2)
+    plt.plot(dates, preds_df[ticker], label="Предикт", color="orange", linewidth=2)
+
+    plt.fill_between(
+        dates,
+        lower_quantile_df[ticker],
+        upper_quantile_df[ticker],
+        color="orange",
+        alpha=0.2,
+        label="Доверительный интервал"
+    )
+
+    plt.title(f"Сравнение таргета с предиктом для тикера {ticker}")
+    plt.xlabel("Дата")
+    plt.ylabel("Доходность")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_corr_heatmap(df: pd.DataFrame):
+    """
+    Рисует тепловую карту корреляции.
+
+    Args:
+        df: Исходный датафрейм.
+    """
+    returns_df = df.pivot(index="date", columns="ticker", values="close").ffill().bfill().pct_change().fillna(0)
+    corr_matrix = returns_df.corr()
+    mask = np.triu(corr_matrix)
+
+    ax = sns.heatmap(
+        data=corr_matrix,
+        annot=True,
+        fmt=".2f",
+        cmap="coolwarm",
+        linewidths=0.5,
+        mask=mask,
+        cbar=False,
+        square=True
+    )
+    ax.set(xlabel="", ylabel="")
+    plt.title("Тепловая карта корреляции доходностей")
     plt.tight_layout()
     plt.show()
